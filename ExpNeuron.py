@@ -4,7 +4,7 @@ import snntorch.surrogate as snnfunc
 
 
 class ExpNeuron(nn.Module):
-	# Реализована модель, где reset_mechanism set to membrane_min
+  	# Реализована модель, где reset_mechanism set to membrane_min
 	# Для упрощения вычислений в данной модели накапливается сумма спайков за время neuron_time
 	# После спайка данная модель обнуляет время нейрона и сбрасывает сумму спайков
 
@@ -60,8 +60,6 @@ class ExpNeuron(nn.Module):
 			membrane_zero = torch.as_tensor(membrane_zero)
 
 		self.membrane_init = membrane_zero.clone()
-		self.neuron_time = 0
-		# self.input_sum = 0
 		
 		self._snn_register_buffer(
 			threshold = threshold,
@@ -74,7 +72,7 @@ class ExpNeuron(nn.Module):
 			learn_membrane_min= learn_membrane_min,
 			graded_spikes_factor = graded_spikes_factor,
 			learn_graded_spikes_factor = learn_graded_spikes_factor)
-		
+		# Возможна передача времени и суммы через параметры
 		self._init_membrane()
 		
 	def _snn_register_buffer(
@@ -164,7 +162,10 @@ class ExpNeuron(nn.Module):
 		# neuron_time = self.neuron_time
 		# self.register_buffer("neuron_time", neuron_time, False)
 		# self.register_buffer("input_sum", input_sum, False)
-
+		neuron_time = torch.zeros(1)
+		input_sum = torch.zeros(1)
+		self.register_buffer("neuron_time", neuron_time, False)
+		self.register_buffer("input_sum", input_sum, False)
 		self.register_buffer("membrane", membrane, False)
 
 	# Требует доработки, так как необходимо еще и взаимодействовать с буфером, чтобы правильно сбросить потенциал
@@ -173,8 +174,8 @@ class ExpNeuron(nn.Module):
 		self.membrane_zero = self.membrane_init.clone()
 		# self.neuron_time = torch.zeros_like(self.neuron_time)
 		# self.input_sum = torch.zeros_like(self.input_sum)
-		self.neuron_time = 0
-		self.input_sum = 0
+		self.neuron_time = torch.zeros(1)
+		self.input_sum = torch.zeros(1)
 		return self.membrane_zero
 			
 	def init_neuron(self):
@@ -187,17 +188,8 @@ class ExpNeuron(nn.Module):
 
 		if self.init_hidden and not membrane == None:
 			raise TypeError("Membrane shouldnt be passed while init_hidden is true")
-		print(input, self.neuron_time, self.membrane_zero)
 		# Изменение размера для обучения батчами
 		if not self.membrane.shape == input.shape:
-			print("correcting shape")
-			# может быть ошибка с градентом здесь 
-			# with torch.no_grad():
-			# 	self.membrane.copy_(torch.ones_like(input) * self.membrane_init)
-			# 	self.membrane_zero.copy_(torch.ones_like(input) * self.membrane_zero)
-			# 	self.input_sum.copy_(torch.zeros_like(input))
-			# 	self.neuron_time.copy_(torch.zeros_like(input))
-
 			self.membrane = torch.ones_like(input) * self.membrane_init
 			self.membrane_zero = torch.ones_like(input) * self.membrane_zero
 			self.input_sum = torch.zeros_like(input)
@@ -222,22 +214,22 @@ class ExpNeuron(nn.Module):
 	# Вероятно использование кумулятивной суммы
 	def _membrane_update_function(self, input):
 
-		# Ограничение значений beta в соответствии с моделью
 		self.input_sum = self.input_sum + input
+		# Ограничение значений beta в соответствии с моделью
 		update = self.membrane_zero * torch.exp(-self.beta.clamp(0, 1)*self.neuron_time + self.input_sum)
 
 		# Следующий шаг времени
-		self.neuron_time += 1
+		self.neuron_time = self.neuron_time + 1
 		
 		return update
 
 
 	def _membrane_set_to(self, input):
 		# При reset близком к 0 membrane_zero устанавливается на membrane_min
-		self.membrane_zero.copy_(self.membrane_zero - self.reset * (self.membrane_zero - self.membrane_min))
+		self.membrane_zero = self.membrane_zero - self.reset * (self.membrane_zero - self.membrane_min) 
 		# При reset близком к 0 обнуляется сумма накопленных спайков 
-		self.input_sum.copy_(self.input_sum - self.reset * (self.input_sum))
-		self.neuron_time.copy_(self.neuron_time - self.reset * (self.neuron_time))
+		self.input_sum = self.input_sum - self.reset * (self.input_sum)
+		self.neuron_time = self.neuron_time - self.reset * (self.neuron_time)
 		return self._membrane_update_function(input)
 		
 
