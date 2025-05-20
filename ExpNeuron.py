@@ -18,13 +18,12 @@ class ExpNeuron(nn.Module):
 			beta = 1e-1, 
 			threshold = 1.0, 
 			membrane_zero = 0.5, 
-			membrane_min = 0.5, 
+			membrane_min = 0.0, 
 			spike_grad = None, 
 			surrogate_disable = False, 
 			learn_threshold = False, 
 			# Реализовать обучение параметра beta
 			learn_beta = False, 
-			# learn_membrane_zero = False,
 			# Требует доработки. Модель при обучении будет сильно шалить
 			learn_membrane_min = False, 
 			output = False, 
@@ -55,12 +54,15 @@ class ExpNeuron(nn.Module):
 		self.output = output
 		self.inhibition = inhibition
 		self.surrogate_disable = surrogate_disable
+
 		# Инициализация внутреннего времени нейрона
 		if not isinstance(membrane_zero, torch.Tensor):
 			membrane_zero = torch.as_tensor(membrane_zero)
+		self.membrane_zero = membrane_zero
 
-		self.membrane_init = membrane_zero.clone()
-		
+		# Инициализация временного шага
+		self.dt = 1
+
 		self._snn_register_buffer(
 			threshold = threshold,
 			beta = beta,
@@ -79,18 +81,15 @@ class ExpNeuron(nn.Module):
 		self,
 		threshold,
 		beta,
-		# membrane_zero,
 		membrane_min,
 		learn_threshold,
 		learn_beta,
-		# learn_membrane_zero,
 		learn_membrane_min,
 		graded_spikes_factor,
 		learn_graded_spikes_factor):
 
 		self._threshold_buffer(threshold, learn_threshold)
 		self._beta_buffer(beta, learn_beta)
-		# self._membrane_zero_buffer(membrane_zero, learn_membrane_zero)
 		self._membrane_min_buffer(membrane_min, learn_membrane_min)
 		self._graded_spikes_buffer(graded_spikes_factor, learn_graded_spikes_factor)
 
@@ -109,14 +108,6 @@ class ExpNeuron(nn.Module):
 			self.beta = nn.Parameter(beta)
 		else:
 			self.register_buffer("beta", beta)
-
-	# def _membrane_zero_buffer(self, membrane_zero, learn_membrane_zero):
-	# 	if not isinstance(membrane_zero, torch.Tensor):
-	# 		membrane_zero = torch.as_tensor(membrane_zero)
-	# 	if learn_membrane_zero:
-	# 		self.membrane_zero = nn.Parameter(membrane_zero)
-	# 	else:
-	# 		self.register_buffer("membrane_zero", membrane_zero)
 
 	def _membrane_min_buffer(self, membrane_min, learn_membrane_min):
 		if not isinstance(membrane_min, torch.Tensor):
@@ -157,43 +148,29 @@ class ExpNeuron(nn.Module):
 		return reset
 	
 	def _init_membrane(self):
-		membrane = self.membrane_init.clone()
-		# Возможна реализация через добавление в буфер
-		# neuron_time = self.neuron_time
-		# self.register_buffer("neuron_time", neuron_time, False)
-		# self.register_buffer("input_sum", input_sum, False)
-		neuron_time = torch.zeros(1)
-		input_sum = torch.zeros(1)
-		self.register_buffer("neuron_time", neuron_time, False)
-		self.register_buffer("input_sum", input_sum, False)
+		membrane = self.membrane_zero.clone()
 		self.register_buffer("membrane", membrane, False)
 
 	# Требует доработки, так как необходимо еще и взаимодействовать с буфером, чтобы правильно сбросить потенциал
 	def reset_membrane(self):
 		# Вероятно обновление вида zeros_like(self.membrane)
-		self.membrane_zero = self.membrane_init.clone()
-		# self.neuron_time = torch.zeros_like(self.neuron_time)
-		# self.input_sum = torch.zeros_like(self.input_sum)
-		self.neuron_time = torch.zeros(1)
-		self.input_sum = torch.zeros(1)
-		return self.membrane_zero
+		self.membrane = self.membrane_zero.clone()
+
+		return self.membrane
 			
 	def init_neuron(self):
 		return self.reset_membrane()
 	
 	# Поработать над этим 
 	def forward(self, input, membrane = None):
-		if not membrane == None:
+		if membrane != None:
 			self.membrane = membrane
 
-		if self.init_hidden and not membrane == None:
+		if self.init_hidden and membrane != None:
 			raise TypeError("Membrane shouldnt be passed while init_hidden is true")
 		# Изменение размера для обучения батчами
-		if not self.membrane.shape == input.shape:
-			self.membrane = torch.ones_like(input) * self.membrane_init
-			self.membrane_zero = torch.ones_like(input) * self.membrane_zero
-			self.input_sum = torch.zeros_like(input)
-			self.neuron_time = torch.zeros_like(input)
+		if self.membrane.shape != input.shape:
+			self.membrane = torch.ones_like(input) * self.membrane_zero
 
 		self.reset = self.membrane_reset(self.membrane)
 		self.membrane = self._membrane_set_to(input)
@@ -213,25 +190,29 @@ class ExpNeuron(nn.Module):
 
 	# Вероятно использование кумулятивной суммы
 	def _membrane_update_function(self, input):
-
-		self.input_sum = self.input_sum + input
-		# Ограничение значений beta в соответствии с моделью
-		update = self.membrane_zero * torch.exp(-self.beta.clamp(0, 1)*self.neuron_time + self.input_sum)
-
-		# Следующий шаг времени
-		self.neuron_time = self.neuron_time + 1
-		
+		# Ограничение значений beta в соответствии с моделью. Проводить инплейс операции нельзя, так что нужно придумать альтернативу. 
+		update = self.membrane + self.membrane * (-self.beta.clamp(0, 1) + input) * self.dt
 		return update
 
 
 	def _membrane_set_to(self, input):
 		# При reset близком к 0 membrane_zero устанавливается на membrane_min
-		self.membrane_zero = self.membrane_zero - self.reset * (self.membrane_zero - self.membrane_min) 
-		# При reset близком к 0 обнуляется сумма накопленных спайков 
-		self.input_sum = self.input_sum - self.reset * (self.input_sum)
-		self.neuron_time = self.neuron_time - self.reset * (self.neuron_time)
+		self.membrane = self.membrane - self.reset * (self.membrane - self.membrane_min) 
+
 		return self._membrane_update_function(input)
 		
+
+	def set_dt(self, dt):
+		if (isinstance(dt, float) | isinstance(dt, int)):
+			if (dt > 0):
+				self.dt = dt
+			else:
+				raise ValueError("dt must be not negative")
+		else:
+			raise ValueError("dt must be integer of float")
+		
+	def get_dt(self, dt):
+		return self.dt
 
 	# добавить detach_hidden, reset_hidden
 
