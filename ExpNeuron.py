@@ -22,9 +22,7 @@ class ExpNeuron(nn.Module):
 			spike_grad = None, 
 			surrogate_disable = False, 
 			learn_threshold = False, 
-			# Реализовать обучение параметра beta
 			learn_beta = False, 
-			# Требует доработки. Модель при обучении будет сильно шалить
 			learn_membrane_min = False, 
 			output = False, 
 			# Реализовать механизм подавления других нейронов
