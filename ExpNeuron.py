@@ -55,12 +55,9 @@ class ExpNeuron(nn.Module):
 		self.output = output
 		self.inhibition = inhibition
 		self.surrogate_disable = surrogate_disable
-		# Инициализация внутреннего времени нейрона
-		if not isinstance(membrane_zero, torch.Tensor):
-			membrane_zero = torch.as_tensor(membrane_zero)
+		self.membrane_zero = torch.as_tensor(membrane_zero)
+		self.membrane_init = self.membrane_zero.detach().clone()
 
-		self.membrane_init = membrane_zero.clone()
-		
 		self._snn_register_buffer(
 			threshold = threshold,
 			beta = beta,
@@ -146,7 +143,7 @@ class ExpNeuron(nn.Module):
 	def fire_inhibition(self, batch_size, mem):
 		pass
 
-	def membrane_reset(self, membrane):
+	def _membrane_reset(self, membrane):
 		# Если surrogate_disable, то reset принимает бинарные значения 
 
 		membrane_shift = membrane - self.threshold
@@ -157,7 +154,9 @@ class ExpNeuron(nn.Module):
 		return reset
 	
 	def _init_membrane(self):
-		membrane = self.membrane_init.clone()
+		# self.membrane = self.membrane_init.clone()
+		self.membrane = None
+
 		# Возможна реализация через добавление в буфер
 		# neuron_time = self.neuron_time
 		# self.register_buffer("neuron_time", neuron_time, False)
@@ -166,14 +165,13 @@ class ExpNeuron(nn.Module):
 		input_sum = torch.zeros(1)
 		self.register_buffer("neuron_time", neuron_time, False)
 		self.register_buffer("input_sum", input_sum, False)
-		self.register_buffer("membrane", membrane, False)
+		# self.register_buffer("membrane", membrane, False)
 
 	# Требует доработки, так как необходимо еще и взаимодействовать с буфером, чтобы правильно сбросить потенциал
 	def reset_membrane(self):
-		# Вероятно обновление вида zeros_like(self.membrane)
+		# self.membrane = 
+
 		self.membrane_zero = self.membrane_init.clone()
-		# self.neuron_time = torch.zeros_like(self.neuron_time)
-		# self.input_sum = torch.zeros_like(self.input_sum)
 		self.neuron_time = torch.zeros(1)
 		self.input_sum = torch.zeros(1)
 		return self.membrane_zero
@@ -181,21 +179,21 @@ class ExpNeuron(nn.Module):
 	def init_neuron(self):
 		return self.reset_membrane()
 	
-	# Поработать над этим 
 	def forward(self, input, membrane = None):
-		if not membrane == None:
+		if membrane is not None: 
 			self.membrane = membrane
 
-		if self.init_hidden and not membrane == None:
+		if self.init_hidden and membrane != None:
 			raise TypeError("Membrane shouldnt be passed while init_hidden is true")
+
 		# Изменение размера для обучения батчами
-		if not self.membrane.shape == input.shape:
+		if (self.membrane is None) or (self.membrane.shape != input.shape):
 			self.membrane = torch.ones_like(input) * self.membrane_init
 			self.membrane_zero = torch.ones_like(input) * self.membrane_zero
 			self.input_sum = torch.zeros_like(input)
 			self.neuron_time = torch.zeros_like(input)
 
-		self.reset = self.membrane_reset(self.membrane)
+		self.reset = self._membrane_reset(self.membrane)
 		self.membrane = self._membrane_set_to(input)
 
 		# Реализовать fire_inhibition
@@ -211,24 +209,27 @@ class ExpNeuron(nn.Module):
 		else:
 			return spk, self.membrane
 
-	# Вероятно использование кумулятивной суммы
 	def _membrane_update_function(self, input):
 
 		self.input_sum = self.input_sum + input
-		# Ограничение значений beta в соответствии с моделью
-		update = self.membrane_zero * torch.exp(-self.beta.clamp(0, 1)*self.neuron_time + self.input_sum)
+		# В данном случае beta служит произведением констант beta, опр. моделью, и time_step size. 
+		update = self.membrane_zero * torch.exp(-self.beta*self.neuron_time + self.input_sum)
 
 		# Следующий шаг времени
-		self.neuron_time = self.neuron_time + 1
+		self.neuron_time = self.neuron_time + 1	
 		
 		return update
 
 
 	def _membrane_set_to(self, input):
-		# При reset близком к 0 membrane_zero устанавливается на membrane_min
+		# При reset близком к 1 membrane_zero устанавливается на membrane_min
 		self.membrane_zero = self.membrane_zero - self.reset * (self.membrane_zero - self.membrane_min) 
-		# При reset близком к 0 обнуляется сумма накопленных спайков 
+		# При reset близком к 1 обнуляется сумма накопленных спайков 
+		"""
+		Ошибка возникает в этом блоке, почему? Что-то не то с обновлением суммы, хотя раньше все было ок, есть вероятность, что важен контекст применения в программе 
+		"""
 		self.input_sum = self.input_sum - self.reset * (self.input_sum)
+
 		self.neuron_time = self.neuron_time - self.reset * (self.neuron_time)
 		return self._membrane_update_function(input)
 		
@@ -239,10 +240,32 @@ class ExpNeuron(nn.Module):
 	def init(cls):
 		cls.instances = []
 
-	@staticmethod
-	def detach(*args):
-		for state in args:
-			state = torch.zeros_like(state)
+	# def detach_state_(self):
+	# 	if getattr(self, "membrane", None) is not None:
+	# 		self.membrane.detach_()
+	# 	if getattr(self, "input_sum", None) is not None:
+	# 		self.input_sum.detach_()
+	# 	if getattr(self, "neuron_time", None) is not None:
+	# 		self.neuron_time.detach_()
+
+	# def reset_state_(self):
+	# 	self.membrane    = None
+	# 	self.input_sum   = None
+	# 	self.neuron_time = None
+
+	# @classmethod
+	# def detach_hidden(cls):
+	# 	"""Отсоединить граф у состояний всех созданных ExpNeuron."""
+	# 	for layer in cls.instances:
+	# 		if isinstance(layer, cls):
+	# 			layer.detach_state_()
+
+	# @classmethod
+	# def reset_hidden(cls):
+	# 	"""Сбросить состояния у всех созданных ExpNeuron."""
+	# 	for layer in cls.instances:
+	# 		if isinstance(layer, cls):
+	# 			layer.reset_state_()
 			
 	@staticmethod
 	def _surrogate_bypass(input):
