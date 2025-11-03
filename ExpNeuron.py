@@ -162,7 +162,7 @@ class ExpNeuron(nn.Module):
 		if self.membrane.shape != input.shape:
 			# Вероятно возникнет ошибка при многомерных данных
 			try:
-				self.membrane = torch.ones_like(input) * self.membrane.item()
+				self.membrane = torch.ones_like(input) * self.membrane.flatten()[0]
 			except Exception as e:
 				print("Multiplying membrane tensor error: ", e)
 
@@ -170,7 +170,7 @@ class ExpNeuron(nn.Module):
 			self.neuron_time = torch.zeros_like(input)
 			# Умножение тензора на тензор
 			try:
-				self.membrane_zero = torch.ones_like(input) * self.membrane_zero.item()
+				self.membrane_zero = torch.ones_like(input) * self.membrane_zero.flatten()[0]
 			except Exception as e:
 				print("Multiplying membrane_zero tensor error: ", e)
 
