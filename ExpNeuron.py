@@ -5,7 +5,6 @@ import snntorch.surrogate as snnfunc
 
 class ExpNeuron(nn.Module):
   	# Реализована модель, где reset_mechanism set to membrane_min
-	# Для упрощения вычислений в данной модели накапливается сумма спайков за время neuron_time
 	# После спайка данная модель обнуляет время нейрона и сбрасывает сумму спайков
 
 	# Обдумать момент с подавлением активности нейрона после испускания спайка
@@ -18,12 +17,11 @@ class ExpNeuron(nn.Module):
 			beta = 1e-1, 
 			threshold = 1.0, 
 			membrane_zero = 0.5, 
-			membrane_min = 0.0, 
 			spike_grad = None, 
 			surrogate_disable = False, 
 			learn_threshold = False, 
 			learn_beta = False, 
-			learn_membrane_min = False, 
+			learn_membrane_zero = False,
 			output = False, 
 			# Реализовать механизм подавления других нейронов
 			inhibition = False,
@@ -53,42 +51,31 @@ class ExpNeuron(nn.Module):
 		self.inhibition = inhibition
 		self.surrogate_disable = surrogate_disable
 
-		# Инициализация внутреннего времени нейрона
-		if not isinstance(membrane_zero, torch.Tensor):
-			membrane_zero = torch.as_tensor(membrane_zero)
-		self.membrane_zero = membrane_zero
-
-		# Инициализация временного шага
-		self.dt = 1
-
 		self._snn_register_buffer(
 			threshold = threshold,
 			beta = beta,
-			# membrane_zero = membrane_zero,
-			membrane_min= membrane_min,
+			membrane_zero = membrane_zero,
+			learn_membrane_zero = learn_membrane_zero,
 			learn_threshold = learn_threshold,
 			learn_beta = learn_beta,
-			# learn_membrane_zero = learn_membrane_zero,
-			learn_membrane_min= learn_membrane_min,
 			graded_spikes_factor = graded_spikes_factor,
 			learn_graded_spikes_factor = learn_graded_spikes_factor)
-		# Возможна передача времени и суммы через параметры
 		self._init_membrane()
 		
 	def _snn_register_buffer(
 		self,
 		threshold,
 		beta,
-		membrane_min,
+		membrane_zero,
 		learn_threshold,
 		learn_beta,
-		learn_membrane_min,
+		learn_membrane_zero,
 		graded_spikes_factor,
 		learn_graded_spikes_factor):
 
 		self._threshold_buffer(threshold, learn_threshold)
 		self._beta_buffer(beta, learn_beta)
-		self._membrane_min_buffer(membrane_min, learn_membrane_min)
+		self._membrane_zero_buffer(membrane_zero, learn_membrane_zero)
 		self._graded_spikes_buffer(graded_spikes_factor, learn_graded_spikes_factor)
 
 	def _threshold_buffer(self, threshold, learn_threshold):
@@ -107,13 +94,13 @@ class ExpNeuron(nn.Module):
 		else:
 			self.register_buffer("beta", beta)
 
-	def _membrane_min_buffer(self, membrane_min, learn_membrane_min):
-		if not isinstance(membrane_min, torch.Tensor):
-			membrane_min = torch.as_tensor(membrane_min)
+	def _membrane_zero_buffer(self, membrane_zero, learn_membrane_min):
+		if not isinstance(membrane_zero, torch.Tensor):
+			membrane_zero = torch.as_tensor(membrane_zero)
 		if learn_membrane_min:
-			self.membrane_min = nn.Parameter(membrane_min)
+			self.membrane_zero = nn.Parameter(membrane_zero)
 		else:
-			self.register_buffer("membrane_min", membrane_min)
+			self.register_buffer("membrane_zero", membrane_zero)
 
 	def _graded_spikes_buffer(self, graded_spikes_factor, learn_graded_spikes_factor):
 		if not isinstance(graded_spikes_factor, torch.Tensor):
@@ -135,7 +122,7 @@ class ExpNeuron(nn.Module):
 	def fire_inhibition(self, batch_size, mem):
 		pass
 
-	def membrane_reset(self, membrane):
+	def _membrane_reset(self, membrane):
 		# Если surrogate_disable, то reset принимает бинарные значения 
 
 		membrane_shift = membrane - self.threshold
@@ -144,33 +131,45 @@ class ExpNeuron(nn.Module):
 		reset = self.spike_grad(membrane_shift).clone().detach()
 
 		return reset
-	
+
 	def _init_membrane(self):
-		membrane = self.membrane_zero.clone()
+		membrane = torch.ones(1) * self.membrane_zero.flatten()[0]
+		input_sum = torch.zeros(1)
+		self.register_buffer("input_sum", input_sum, False)
 		self.register_buffer("membrane", membrane, False)
 
-	# Требует доработки, так как необходимо еще и взаимодействовать с буфером, чтобы правильно сбросить потенциал
 	def reset_membrane(self):
-		# Вероятно обновление вида zeros_like(self.membrane)
-		self.membrane = self.membrane_zero.clone()
+		self.membrane = torch.ones_like(self.membrane) * self.membrane_zero.flatten()[0]
+		self.input_sum.zero_()
 
 		return self.membrane
 			
 	def init_neuron(self):
 		return self.reset_membrane()
 	
-	# Поработать над этим 
 	def forward(self, input, membrane = None):
-		if membrane != None:
-			self.membrane = membrane
+		if membrane is not None: 
+			self.membrane.copy_(membrane)
 
 		if self.init_hidden and membrane != None:
 			raise TypeError("Membrane shouldnt be passed while init_hidden is true")
+
 		# Изменение размера для обучения батчами
 		if self.membrane.shape != input.shape:
-			self.membrane = torch.ones_like(input) * self.membrane_zero
+			# Вероятно возникнет ошибка при многомерных данных
+			try:
+				self.membrane = torch.ones_like(input) * self.membrane.flatten()[0]
+			except Exception as e:
+				print("Multiplying membrane tensor error: ", e)
 
-		self.reset = self.membrane_reset(self.membrane)
+			self.input_sum = torch.zeros_like(input)
+			# Умножение тензора на тензор
+			try:
+				self.membrane_zero = torch.ones_like(input) * self.membrane_zero.flatten()[0]
+			except Exception as e:
+				print("Multiplying membrane_zero tensor error: ", e)
+
+		self.reset = self._membrane_reset(self.membrane)
 		self.membrane = self._membrane_set_to(input)
 
 		# Реализовать fire_inhibition
@@ -186,42 +185,68 @@ class ExpNeuron(nn.Module):
 		else:
 			return spk, self.membrane
 
-	# Вероятно использование кумулятивной суммы
 	def _membrane_update_function(self, input):
-		# Ограничение значений beta в соответствии с моделью. Проводить инплейс операции нельзя, так что нужно придумать альтернативу. 
-		update = self.membrane + self.membrane * (-self.beta.clamp(0, 1) + input) * self.dt
+
+		# self.input_sum = self.input_sum + input
+		print("membrane ", self.membrane)
+		update = self.membrane * torch.exp(input) * self.beta
+		print("update ", update)
+		print("")
 		return update
 
-
 	def _membrane_set_to(self, input):
-		# При reset близком к 0 membrane_zero устанавливается на membrane_min
-		self.membrane = self.membrane - self.reset * (self.membrane - self.membrane_min) 
+		# При reset близком к 1 обнуляется сумма накопленных спайков 
+		"""
+		Ошибка возникает в этом блоке, почему? Что-то не то с обновлением суммы, хотя раньше все было ок, есть вероятность, что важен контекст применения в программе 
+		"""
+		# self.input_sum = self.input_sum - self.reset * (self.input_sum)
+		self.membrane = self.membrane - self.reset * (self.membrane - self.membrane_zero)
+		
 
 		return self._membrane_update_function(input)
 		
-
-	def set_dt(self, dt):
-		if (isinstance(dt, float) | isinstance(dt, int)):
-			if (dt > 0):
-				self.dt = dt
-			else:
-				raise ValueError("dt must be not negative")
-		else:
-			raise ValueError("dt must be integer of float")
-		
-	def get_dt(self, dt):
-		return self.dt
-
-	# добавить detach_hidden, reset_hidden
-
 	@classmethod
 	def init(cls):
 		cls.instances = []
 
-	@staticmethod
-	def detach(*args):
-		for state in args:
-			state = torch.zeros_like(state)
+	# def detach_state_(self):
+	# 	if getattr(self, "membrane", None) is not None:
+	# 		self.membrane.detach_()
+	# 	if getattr(self, "input_sum", None) is not None:
+	# 		self.input_sum.detach_()
+
+	# def reset_state_(self):
+	# 	self.membrane    = None
+	# 	self.input_sum   = None
+
+	# membrane_zero / membrane_min
+	@classmethod
+	def detach_hidden(cls):
+		"""Returns the hidden states, detached from the current graph.
+		Intended for use in truncated backpropagation through time where
+		hidden state variables are instance variables."""
+
+		for layer in range(len(cls.instances)):
+			if isinstance(cls.instances[layer], ExpNeuron):
+				cls.instances[layer].membrane.detach_()
+				cls.instances[layer].input_sum.detach_()
+
+	# membrane_zero / membrane_min
+	@classmethod
+	def reset_hidden(cls):
+		"""Used to clear hidden state variables to zero.
+		Intended for use where hidden state variables are instance variables.
+		Assumes hidden states have a batch dimension already."""
+		for layer in range(len(cls.instances)):
+			if isinstance(cls.instances[layer], ExpNeuron):
+				cls.instances[layer].membrane = torch.zeros_like(
+					cls.instances[layer].membrane,
+					device=cls.instances[layer].membrane.device,
+				)
+				cls.instances[layer].input_sum = torch.zeros_like(
+					cls.instances[layer].input_sum,
+					device=cls.instances[layer].input_sum.device,
+				)
 			
 	@staticmethod
 	def _surrogate_bypass(input):
